@@ -5,10 +5,17 @@ import numpy as np
 import cv2
 import ctypes
 
+PROCESS_PER_MONITOR_DPI_AWARE = 2
 gdi32 = ctypes.windll.gdi32
+# Set process DPI awareness
+
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE)
+except AttributeError:
+    # Fallback if SetProcessDpiAwareness does not exist (earlier versions of Windows)
+    ctypes.windll.user32.SetProcessDPIAware()
 
 def capture_display(screen_numbers, region = None):
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
     monitors_info = win32api.EnumDisplayMonitors()
     captured_images = []
 
