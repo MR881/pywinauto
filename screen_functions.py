@@ -1,82 +1,25 @@
-import ctypes
+import win32con
+import win32api
+import win32gui
 import numpy as np
 import cv2
-from display_structures import MONITORENUMPROC, BITMAPINFO, BITMAPINFOHEADER
-import win32con
-from typing import List, Tuple, Optional
+import ctypes
 
-# Load dlls
-user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
-shcore = ctypes.windll.shcore
-kernel32 = ctypes.windll.kernel32
 
-SRCCOPY = win32con.SRCCOPY
-
-def monitor_enum_proc(hMonitor, hdcMonitor, lprcMonitor, dwData, monitors):
-    """
-    Callback function for EnumDisplayMonitors.
-    This function is called by the system for each monitor detected, adding the monitor's
-    coordinates to the provided list.
-
-    Args:
-        hMonitor (HMONITOR): Handle to the display monitor.
-        hdcMonitor (HDC): Handle to a device context.
-        lprcMonitor (POINTER(RECT)): Pointer to a RECT structure with monitor coordinates.
-        dwData (LPARAM): Application-defined data (unused in this function).
-        monitors (list): List to append monitor coordinates.
-
-    Returns:
-        BOOL: True to continue enumeration, False to stop.
-    """
-    r = lprcMonitor.contents
-    monitors.append((r.left, r.top, r.right, r.bottom))
-    return True
-
-def enumerate_monitors():
-    """
-    Enumerates all display monitors and returns their coordinates.
-
-    Returns:
-        list of tuples: A list where each tuple contains the coordinates (left, top, right, bottom)
-        of a monitor.
-    """
-    monitors = []
-    # Create a lambda function that adapts the callback signature and includes the monitors list.
-    callback = MONITORENUMPROC(lambda hMonitor, hdcMonitor, lprcMonitor, dwData: 
-                               monitor_enum_proc(hMonitor, hdcMonitor, lprcMonitor, dwData, monitors))
-    # Load user32 DLL and call EnumDisplayMonitors with the callback.
-    user32.EnumDisplayMonitors(None, None, callback, 0)
-    return monitors
-
-def capture_display(screen_numbers: List[int], region: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None):
-    """
-    This function uses low level calls to access relevant display 
-    information and returns a numpy array for the associated display
-    or displays.
-    Args:
-        screen_numbers (List[int]): The list of screen numbers to capture.
-        region (Optional[Tuple[Tuple[int, int], Tuple[int, int]]], optional): 
-            A tuple of two tuples, each representing a point (x, y).
-            For example, ((x1, y1), (x2, y2)) defines the top-left and bottom-right points of the region.
-            Captures the full screen if None.
-
-    Returns:
-        numpy.ndarray or None: Captured image or None if failed.
-    """
-    shcore.SetProcessDpiAwareness(2)
-    monitor_list = enumerate_monitors()
+def capture_display(screen_numbers, region = None):
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    monitors_info = win32api.EnumDisplayMonitors()
     captured_images = []
 
     for screen_number in screen_numbers:
-        if screen_number >= len(monitor_list):
+        if screen_number >= len(monitors_info):
             print(f"Invalid screen number: {screen_number}")
             continue
 
-        monitor = monitor_list[screen_number]
-        # Use the entire monitor size if no region is specified
         if region is None:
-            left, top, right, bottom = monitor
+            left, top, right, bottom = monitors_info[screen_number][2]
+
         else:
             x1, y1 = region[0]
             x2, y2 = region[1]
@@ -87,36 +30,47 @@ def capture_display(screen_numbers: List[int], region: Optional[Tuple[Tuple[int,
             right = int(right)
             top = int(top)
             bottom = int(bottom)
+
         width = right - left
         height = bottom - top
 
-        # Create a device context for the entire screen and a compatible context
-        h_desktop_dc = user32.GetWindowDC(0)
-        if not h_desktop_dc:
-            print("GetWindowDC failed:", kernel32.GetLastError())
-            return None
-        
-        h_capture_dc = gdi32.CreateCompatibleDC(h_desktop_dc)
-        if not h_capture_dc:
-            print("CreateCompatibleDC failed:", kernel32.GetLastError())
-            user32.ReleaseDC(0, h_desktop_dc)
-            return None
-        
-        h_capture_bitmap = gdi32.CreateCompatibleBitmap(h_desktop_dc, width, height)
-        if not h_capture_bitmap:
-            print("CreateCompatibleBitmap failed:", kernel32.GetLastError())
-            gdi32.DeleteDC(h_capture_dc)
-            user32.ReleaseDC(0, h_desktop_dc)
-            return None
-        
-        gdi32.SelectObject(h_capture_dc, h_capture_bitmap)
 
-        # Copy the screen content to the bitmap
-        if not gdi32.BitBlt(h_capture_dc, 0, 0, width, height, h_desktop_dc, left, top, SRCCOPY):
-            print("BitBlt failed:", kernel32.GetLastError())
+        h_desktop_dc = win32gui.GetWindowDC(0)
+        h_capture_dc = win32gui.CreateCompatibleDC(h_desktop_dc)
+        h_capture_bmp = win32gui.CreateCompatibleBitmap(h_desktop_dc, width, height)
+        
+        win32gui.SelectObject(h_capture_dc, h_capture_bmp)
+        win32gui.BitBlt(h_capture_dc, 0, 0, width, height, h_desktop_dc, left, top, win32con.SRCCOPY)
+        
 
-        # Create a buffer and copy the bitmap data into it
+        # Since pywin32 doesn't have the GetDIBits (which is a great function they should really have it)
+        # The function has to make an instance of bitmap info and info header for the pointers to work
+        # properly...
+
+        ############## Declairing the class structures
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", ctypes.c_uint32),
+                ("biWidth", ctypes.c_long),
+                ("biHeight", ctypes.c_long),
+                ("biPlanes", ctypes.c_uint16),
+                ("biBitCount", ctypes.c_uint16),
+                ("biCompression", ctypes.c_uint32),
+                ("biSizeImage", ctypes.c_uint32),
+                ("biXPelsPerMeter", ctypes.c_long),
+                ("biYPelsPerMeter", ctypes.c_long),
+                ("biClrUsed", ctypes.c_uint32),
+                ("biClrImportant", ctypes.c_uint32)
+            ]
+
+        class BITMAPINFO(ctypes.Structure):
+            _fields_ = [
+                ('bmiHeader', BITMAPINFOHEADER),
+                ('bmiColors', ctypes.c_uint32 * 1)
+            ]
+        ##############
         image_data = ctypes.create_string_buffer(width * height * 4)
+
         bmp_info = BITMAPINFO()
         bmp_info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
         bmp_info.bmiHeader.biWidth = width
@@ -124,73 +78,59 @@ def capture_display(screen_numbers: List[int], region: Optional[Tuple[Tuple[int,
         bmp_info.bmiHeader.biPlanes = 1
         bmp_info.bmiHeader.biBitCount = 32
         bmp_info.bmiHeader.biCompression = 0
-        gdi32.GetDIBits(h_capture_dc, h_capture_bitmap, 0, height, image_data, ctypes.byref(bmp_info), 0)
 
-        # Clean up
-        gdi32.DeleteObject(h_capture_bitmap)
-        gdi32.DeleteDC(h_capture_dc)
-        user32.ReleaseDC(0, h_desktop_dc)
+
+        # This is the properway to grab the winapi handle from the Pyhandle without detaching
+        # The .__init__() method is only to be used to create a new instance. But if you're
+        # doing that you might as well just call the HANDLE function.
+        h_capture_bmp_handle = int(h_capture_bmp)
+
+        # Pywin32 currently doesn't have the GetDIBits function for Bitmap data...
+        # https://github.com/mhammond/pywin32/issues/2120
+        # So need to call it from gdi32 instead
+        gdi32.GetDIBits(h_capture_dc, h_capture_bmp_handle, 0, height, image_data, ctypes.byref(bmp_info), 0)
+
+
+        win32gui.DeleteObject(h_capture_bmp_handle)
+        win32gui.DeleteObject(h_capture_bmp)
+        win32gui.DeleteDC(h_capture_dc)
+        win32gui.ReleaseDC(0, h_desktop_dc)
 
         # Convert to an image (NumPy array)
         image = np.frombuffer(image_data, dtype=np.uint8).reshape((height, width, 4))
         captured_images.append(image)
 
-    # Combine images if more than one is captured
     if len(captured_images) > 1:
         return np.hstack(captured_images)
+    elif len(captured_images) == 1:
+        return captured_images[0]
+    else:
+        return None
 
-    return captured_images[0] if captured_images else None
-
-def screenshots(screen_numbers=[0], combined=False, region: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None):
+def screenshots(screen_numbers=[0], combined=False, region = None):
     captured_images = []
     for screen_number in screen_numbers:
-        screenshot = capture_display([screen_number], region)
-        if screenshot is not None and screenshot.shape[0] > 0 and screenshot.shape[1] > 0:
-            captured_images.append(screenshot)
-        else:
-            print(f"Invalid screenshot dimensions for Screen {screen_number + 1}")
+        screenshot = capture_display(screen_number, region)
 
     if combined and len(captured_images) > 1:
         combined_screenshot = np.hstack(captured_images)
         cv2.imshow('Combined Screens', combined_screenshot)
     else:
         for i, image in enumerate(captured_images):
-            cv2.imshow(f'Screen {screen_numbers[i] + 1}', image)
+            cv2.imshow(f'Monitor {screen_numbers[i] + 1}', image)
 
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
-def screenshot(screen_numbers: Optional[List[int]] = None, combined: bool = False, 
-                region: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None):
-    if screen_numbers is None:
-        screen_numbers = [0]
-    
-    captured_images = []
-    for screen_number in screen_numbers:
-        screenshot = capture_display([screen_number], region)
-        if screenshot is not None and screenshot.shape[0] > 0 and screenshot.shape[1] > 0:
-            captured_images.append(screenshot)
-        else:
-            print(f"Invalid screenshot dimensions for Screen {screen_number + 1}")
-
-    if combined and len(captured_images) > 1:
-        combined_screenshot = np.hstack(captured_images)
-        return combined_screenshot
-    elif len(captured_images) == 1:
-        return captured_images[0]
-    else:
-        # Handling the case where no valid screenshots were captured
-        return None
-
 def screen_recorder(screen_numbers=[0], frame_rate=30, combined=False):
-
+        
     if combined:
         cv2.namedWindow('Combined Screens', cv2.WINDOW_NORMAL)
         cv2.resizeWindow('Combined Screens', 1280, 480)  # Adjust size as needed
     else:
         for screen_number in screen_numbers:
-            cv2.namedWindow(f'Screen {screen_number + 1}', cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(f'Screen {screen_number + 1}', 640, 480)
+            cv2.namedWindow(f'Monitor {screen_number + 1}', cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(f'Monitor {screen_number + 1}', 640, 480)
 
     while True:
         captured_images = []
@@ -206,38 +146,11 @@ def screen_recorder(screen_numbers=[0], frame_rate=30, combined=False):
             cv2.imshow('Combined Screens', combined_screenshot)
         elif captured_images:
             for i, image in enumerate(captured_images):
-                cv2.imshow(f'Screen {screen_numbers[i] + 1}', image)
+                cv2.imshow(f'Monitor {screen_numbers[i] + 1}', image)
 
         if cv2.waitKey(1000 // frame_rate) & 0xFF == ord('q'):
             break
 
-    cv2.destroyAllWindows()
-
-def edge_detection(screen_numbers=[0], combined=False, region=None):
-    captured_images = []
-
-    for screen_number in screen_numbers:
-        screenshot = capture_display([screen_number], region)  # Replace with your custom capture_display function
-        if screenshot is not None and screenshot.shape[0] > 0 and screenshot.shape[1] > 0:
-            captured_images.append(screenshot)
-        else:
-            print(f"Invalid screenshot dimensions for Screen {screen_number + 1}")
-
-    edged_images = []
-
-    for image in captured_images:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        edged = cv2.Canny(gray, 30, 200)
-        edged_images.append(edged)
-
-    if combined and len(edged_images) > 1:
-        combined_edged_image = np.hstack(edged_images)
-        cv2.imshow('Combined Edge Detection', combined_edged_image)
-    else:
-        for i, edged_image in enumerate(edged_images):
-            cv2.imshow(f'Edge Detection - Screen {screen_numbers[i] + 1}', edged_image)
-
-    cv2.waitKey(0)
     cv2.destroyAllWindows()
 
 def find_image_center_in_region(captured_image, template_path, confidence=0.8):
